@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"fmt"
 	"io"
 	"log"
@@ -414,6 +415,7 @@ func processDetailPageWithTimeout(url string, timeout time.Duration) (ScrapedDat
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
+	// Remove or modify Accept-Encoding to handle gzip properly
 	req.Header.Set("Accept-Encoding", "gzip, deflate")
 	req.Header.Set("Connection", "keep-alive")
 	req.Header.Set("Upgrade-Insecure-Requests", "1")
@@ -428,13 +430,31 @@ func processDetailPageWithTimeout(url string, timeout time.Duration) (ScrapedDat
 		return ScrapedData{}, fmt.Errorf("HTTP %d: %s", res.StatusCode, res.Status)
 	}
 
-	doc, err := html.Parse(res.Body)
+	// Handle gzip compression
+	var reader io.Reader = res.Body
+	if res.Header.Get("Content-Encoding") == "gzip" {
+		gzipReader, err := gzip.NewReader(res.Body)
+		if err != nil {
+			return ScrapedData{}, fmt.Errorf("failed to create gzip reader: %v", err)
+		}
+		defer gzipReader.Close()
+		reader = gzipReader
+	}
+
+	// Read the body content
+	bodyBytes, err := io.ReadAll(reader)
+	if err != nil {
+		return ScrapedData{}, fmt.Errorf("failed to read response body: %v", err)
+	}
+
+	// Parse HTML from the decompressed content
+	doc, err := html.Parse(strings.NewReader(string(bodyBytes)))
 	if err != nil {
 		return ScrapedData{}, err
 	}
 
-	// Save a sample HTML file for debugging
-	saveHTMLSample(url, doc)
+	// Save a sample HTML file for debugging (first few only)
+	saveHTMLSample(url, string(bodyBytes))
 
 	name := extractName(doc)
 	privateEmail, workEmail := extractEmails(doc)
@@ -483,28 +503,29 @@ func extractName(n *html.Node) string {
 func extractEmails(n *html.Node) (string, string) {
 	var privateEmail string
 	var workEmail string
-	var debugInfo []string
+	var allH4s []string
+	var allMailtos []string
 
 	var f func(*html.Node)
 	f = func(n *html.Node) {
-		// Debug: Log all h4 elements we find
+		// Collect all h4 elements for debugging
 		if n.Type == html.ElementNode && n.Data == "h4" {
 			h4Text := strings.TrimSpace(extractText(n))
-			debugInfo = append(debugInfo, fmt.Sprintf("Found h4: '%s'", h4Text))
+			allH4s = append(allH4s, h4Text)
 		}
 
-		// Debug: Log all mailto links we find
+		// Collect all mailto links for debugging
 		if n.Type == html.ElementNode && n.Data == "a" {
 			for _, attr := range n.Attr {
 				if attr.Key == "href" && strings.HasPrefix(attr.Val, "mailto:") {
 					email := strings.TrimPrefix(attr.Val, "mailto:")
-					debugInfo = append(debugInfo, fmt.Sprintf("Found mailto: '%s'", email))
+					allMailtos = append(allMailtos, email)
 				}
 			}
 		}
 
 		if n.Type == html.ElementNode && n.Data == "div" {
-			// Look for h4 as first child of div
+			// Look for h4 as child of div (not necessarily first child)
 			var h4Text string
 			for c := n.FirstChild; c != nil; c = c.NextSibling {
 				if c.Type == html.ElementNode && c.Data == "h4" {
@@ -513,25 +534,21 @@ func extractEmails(n *html.Node) (string, string) {
 				}
 			}
 
-			// If we found a relevant h4, search for email in this div
-			if h4Text == "privatadresse" || h4Text == "büroadresse" {
-				debugInfo = append(debugInfo, fmt.Sprintf("Found relevant div with h4: '%s'", h4Text))
-				// Search for span > a[href^="mailto:"] within this div
+			// Check for various possible spellings/formats
+			if strings.Contains(h4Text, "privat") || strings.Contains(h4Text, "büro") ||
+				h4Text == "privatadresse" || h4Text == "büroadresse" {
+
+				// Search for email in this div
 				email := findEmailInDiv(n)
 				if email != "" {
-					debugInfo = append(debugInfo, fmt.Sprintf("Found email in div: '%s'", email))
 					// Skip generic emails
 					if !strings.EqualFold(email, "info@akbw.de") && !strings.EqualFold(email, "info@exyte.net") {
-						if h4Text == "privatadresse" {
+						if strings.Contains(h4Text, "privat") {
 							privateEmail = email
-						} else if h4Text == "büroadresse" {
+						} else if strings.Contains(h4Text, "büro") {
 							workEmail = email
 						}
-					} else {
-						debugInfo = append(debugInfo, fmt.Sprintf("Skipped generic email: '%s'", email))
 					}
-				} else {
-					debugInfo = append(debugInfo, "No email found in this div")
 				}
 			}
 		}
@@ -543,22 +560,22 @@ func extractEmails(n *html.Node) (string, string) {
 	}
 	f(n)
 
-	// Log debug info for first few pages only to avoid spam
-	if len(debugInfo) > 0 {
-		log.Printf("Email extraction debug info: %v", debugInfo)
+	// Debug output for first few calls
+	if len(allH4s) > 0 || len(allMailtos) > 0 {
+		log.Printf("Found H4s: %v, Found Mailtos: %v", allH4s, allMailtos)
 	}
 
 	return privateEmail, workEmail
 }
 
 // Also add this function to save a sample HTML file for inspection
-func saveHTMLSample(url string, doc *html.Node) {
+func saveHTMLSample(url string, htmlContent string) {
 	// Only save first few samples
 	if _, err := os.Stat("sample.html"); os.IsNotExist(err) {
 		file, err := os.Create("sample.html")
 		if err == nil {
 			defer file.Close()
-			html.Render(file, doc)
+			file.WriteString(htmlContent)
 			log.Printf("Saved HTML sample from %s to sample.html", url)
 		}
 	}
