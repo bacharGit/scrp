@@ -5,7 +5,6 @@ import (
 	"compress/gzip"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path"
@@ -18,17 +17,16 @@ import (
 )
 
 const (
-	MainPage string = "https://www.akbw.de/kammer/datenbanken/architektenliste/suchergebnisse-architektenliste"
-	// PagesCount            int           = 218
-	PagesCount            int           = 10
+	MainPage              string        = "https://www.akbw.de/kammer/datenbanken/architektenliste/suchergebnisse-architektenliste"
+	PagesCount            int           = 218
 	Unique                string        = "/detail/eintrag/"
 	BaseURL               string        = "https://www.akbw.de"
 	MaxRetries            int           = 3
 	RetryDelay            time.Duration = 2 * time.Second
 	MaxConcurrentRequests int           = 5
-	RequestDelay          time.Duration = 1 * time.Second
-	BatchSize             int           = 50                      // Process 50 pages before delay
-	BatchDelay            time.Duration = 1500 * time.Millisecond // 1.5 seconds delay
+	RequestDelay          time.Duration = 100 * time.Millisecond
+	BatchSize             int           = 50
+	BatchDelay            time.Duration = time.Second
 )
 
 type ScrapedData struct {
@@ -453,14 +451,8 @@ func processDetailPageWithTimeout(url string, timeout time.Duration) (ScrapedDat
 		return ScrapedData{}, err
 	}
 
-	// Save a sample HTML file for debugging (first few only)
-	saveHTMLSample(url, string(bodyBytes))
-
 	name := extractName(doc)
 	privateEmail, workEmail := extractEmails(doc)
-
-	// Debug: Log what we extracted
-	log.Printf("Extracted from %s - Name: '%s', Private: '%s', Work: '%s'", url, name, privateEmail, workEmail)
 
 	return ScrapedData{
 		Name:         name,
@@ -542,7 +534,7 @@ func extractEmails(n *html.Node) (string, string) {
 				email := findEmailInDiv(n)
 				if email != "" {
 					// Skip generic emails
-					if !strings.EqualFold(email, "info@akbw.de") && !strings.EqualFold(email, "info@exyte.net") {
+					if !strings.HasPrefix(email, "info@") {
 						if strings.Contains(h4Text, "privat") {
 							privateEmail = email
 						} else if strings.Contains(h4Text, "büro") {
@@ -560,25 +552,7 @@ func extractEmails(n *html.Node) (string, string) {
 	}
 	f(n)
 
-	// Debug output for first few calls
-	if len(allH4s) > 0 || len(allMailtos) > 0 {
-		log.Printf("Found H4s: %v, Found Mailtos: %v", allH4s, allMailtos)
-	}
-
 	return privateEmail, workEmail
-}
-
-// Also add this function to save a sample HTML file for inspection
-func saveHTMLSample(url string, htmlContent string) {
-	// Only save first few samples
-	if _, err := os.Stat("sample.html"); os.IsNotExist(err) {
-		file, err := os.Create("sample.html")
-		if err == nil {
-			defer file.Close()
-			file.WriteString(htmlContent)
-			log.Printf("Saved HTML sample from %s to sample.html", url)
-		}
-	}
 }
 
 // extractText retrieves the concatenated text content of a node
