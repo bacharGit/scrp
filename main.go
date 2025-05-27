@@ -17,7 +17,8 @@ import (
 
 const (
 	MainPage              string        = "https://www.akbw.de/kammer/datenbanken/architektenliste/suchergebnisse-architektenliste"
-	PagesCount            int           = 218
+	// PagesCount            int           = 218
+	PagesCount            int           = 10
 	Unique                string        = "/detail/eintrag/"
 	BaseURL               string        = "https://www.akbw.de"
 	MaxRetries            int           = 3
@@ -508,6 +509,8 @@ func extractEmails(n *html.Node) (string, string) {
 		}
 	}
 	f(n)
+	
+	fmt.Println("Found: ", workEmail + " " + privateEmail)
 	return privateEmail, workEmail
 }
 
