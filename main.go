@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path"
@@ -16,7 +17,7 @@ import (
 )
 
 const (
-	MainPage              string        = "https://www.akbw.de/kammer/datenbanken/architektenliste/suchergebnisse-architektenliste"
+	MainPage string = "https://www.akbw.de/kammer/datenbanken/architektenliste/suchergebnisse-architektenliste"
 	// PagesCount            int           = 218
 	PagesCount            int           = 10
 	Unique                string        = "/detail/eintrag/"
@@ -432,8 +433,14 @@ func processDetailPageWithTimeout(url string, timeout time.Duration) (ScrapedDat
 		return ScrapedData{}, err
 	}
 
+	// Save a sample HTML file for debugging
+	saveHTMLSample(url, doc)
+
 	name := extractName(doc)
 	privateEmail, workEmail := extractEmails(doc)
+
+	// Debug: Log what we extracted
+	log.Printf("Extracted from %s - Name: '%s', Private: '%s', Work: '%s'", url, name, privateEmail, workEmail)
 
 	return ScrapedData{
 		Name:         name,
@@ -469,49 +476,92 @@ func extractName(n *html.Node) string {
 }
 
 // extractEmails searches for <h4> elements with specific text and extracts the email from the subsequent <span><a href="mailto:...">
+//
+//	func extractEmails(n *html.Node) (string, string) {
+//		var privateEmail string
+//		var workEmail string
 func extractEmails(n *html.Node) (string, string) {
 	var privateEmail string
 	var workEmail string
+	var debugInfo []string
 
 	var f func(*html.Node)
 	f = func(n *html.Node) {
+		// Debug: Log all h4 elements we find
 		if n.Type == html.ElementNode && n.Data == "h4" {
-			headerText := strings.ToLower(extractText(n))
-			if headerText == "privatadresse" || headerText == "büroadresse" {
-				// Find the next sibling <span>
-				for s := n.NextSibling; s != nil; s = s.NextSibling {
-					if s.Type == html.ElementNode && s.Data == "span" {
-						for a := s.FirstChild; a != nil; a = a.NextSibling {
-							if a.Type == html.ElementNode && a.Data == "a" {
-								for _, attr := range a.Attr {
-									if attr.Key == "href" && strings.HasPrefix(attr.Val, "mailto:") {
-										email := strings.TrimPrefix(attr.Val, "mailto:")
-										email = strings.TrimSpace(email)
-										if strings.EqualFold(email, "info@akbw.de") || strings.EqualFold(email, "info@exyte.net") {
-											continue
-										}
-										if headerText == "privatadresse" {
-											privateEmail = email
-										} else if headerText == "büroadresse" {
-											workEmail = email
-										}
-									}
-								}
-							}
-						}
-						break
-					}
+			h4Text := strings.TrimSpace(extractText(n))
+			debugInfo = append(debugInfo, fmt.Sprintf("Found h4: '%s'", h4Text))
+		}
+
+		// Debug: Log all mailto links we find
+		if n.Type == html.ElementNode && n.Data == "a" {
+			for _, attr := range n.Attr {
+				if attr.Key == "href" && strings.HasPrefix(attr.Val, "mailto:") {
+					email := strings.TrimPrefix(attr.Val, "mailto:")
+					debugInfo = append(debugInfo, fmt.Sprintf("Found mailto: '%s'", email))
 				}
 			}
 		}
+
+		if n.Type == html.ElementNode && n.Data == "div" {
+			// Look for h4 as first child of div
+			var h4Text string
+			for c := n.FirstChild; c != nil; c = c.NextSibling {
+				if c.Type == html.ElementNode && c.Data == "h4" {
+					h4Text = strings.ToLower(strings.TrimSpace(extractText(c)))
+					break
+				}
+			}
+
+			// If we found a relevant h4, search for email in this div
+			if h4Text == "privatadresse" || h4Text == "büroadresse" {
+				debugInfo = append(debugInfo, fmt.Sprintf("Found relevant div with h4: '%s'", h4Text))
+				// Search for span > a[href^="mailto:"] within this div
+				email := findEmailInDiv(n)
+				if email != "" {
+					debugInfo = append(debugInfo, fmt.Sprintf("Found email in div: '%s'", email))
+					// Skip generic emails
+					if !strings.EqualFold(email, "info@akbw.de") && !strings.EqualFold(email, "info@exyte.net") {
+						if h4Text == "privatadresse" {
+							privateEmail = email
+						} else if h4Text == "büroadresse" {
+							workEmail = email
+						}
+					} else {
+						debugInfo = append(debugInfo, fmt.Sprintf("Skipped generic email: '%s'", email))
+					}
+				} else {
+					debugInfo = append(debugInfo, "No email found in this div")
+				}
+			}
+		}
+
+		// Continue traversing
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
 			f(c)
 		}
 	}
 	f(n)
-	
-	fmt.Println("Found: ", workEmail + " " + privateEmail)
+
+	// Log debug info for first few pages only to avoid spam
+	if len(debugInfo) > 0 {
+		log.Printf("Email extraction debug info: %v", debugInfo)
+	}
+
 	return privateEmail, workEmail
+}
+
+// Also add this function to save a sample HTML file for inspection
+func saveHTMLSample(url string, doc *html.Node) {
+	// Only save first few samples
+	if _, err := os.Stat("sample.html"); os.IsNotExist(err) {
+		file, err := os.Create("sample.html")
+		if err == nil {
+			defer file.Close()
+			html.Render(file, doc)
+			log.Printf("Saved HTML sample from %s to sample.html", url)
+		}
+	}
 }
 
 // extractText retrieves the concatenated text content of a node
@@ -572,4 +622,25 @@ func saveFailedURLs(failedURLs []FailedURL, filename string) error {
 	}
 
 	return nil
+}
+
+func findEmailInDiv(div *html.Node) string {
+	var email string
+	var search func(*html.Node)
+	search = func(n *html.Node) {
+		if n.Type == html.ElementNode && n.Data == "a" {
+			for _, attr := range n.Attr {
+				if attr.Key == "href" && strings.HasPrefix(attr.Val, "mailto:") {
+					email = strings.TrimPrefix(attr.Val, "mailto:")
+					email = strings.TrimSpace(email)
+					return
+				}
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			search(c)
+		}
+	}
+	search(div)
+	return email
 }
